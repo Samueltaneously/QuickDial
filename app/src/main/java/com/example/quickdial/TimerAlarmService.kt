@@ -13,20 +13,22 @@ import android.media.MediaPlayer
 import android.media.RingtoneManager
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 
 class TimerAlarmService : Service() {
 
     companion object {
         const val ACTION_START = "com.example.quickdial.ALARM_START"
         const val ACTION_STOP = "com.example.quickdial.ALARM_STOP"
+
         private const val CHANNEL = "quickdial_alarm"
         private const val NOTIFICATION_ID = 402
+        private const val TAG = "QuickDialAlarm"
 
         fun stop(context: Context) {
-            context.startService(
-                Intent(context, TimerAlarmService::class.java)
-                    .setAction(ACTION_STOP)
-            )
+            val intent = Intent(context, TimerAlarmService::class.java)
+                .setAction(ACTION_STOP)
+            context.startService(intent)
         }
     }
 
@@ -39,6 +41,8 @@ class TimerAlarmService : Service() {
         flags: Int,
         startId: Int
     ): Int {
+        Log.i(TAG, "Service started: ${intent?.action}")
+
         if (intent?.action == ACTION_STOP) {
             stopAlarm()
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -46,25 +50,40 @@ class TimerAlarmService : Service() {
             return START_NOT_STICKY
         }
 
-        createChannel()
-        startForeground(NOTIFICATION_ID, buildNotification())
-        startAlarm()
-
-        return START_NOT_STICKY
+        return try {
+            createChannel()
+            startForeground(NOTIFICATION_ID, buildNotification())
+            startAlarm()
+            START_NOT_STICKY
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start alarm service", e)
+            stopAlarm()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            START_NOT_STICKY
+        }
     }
 
     private fun startAlarm() {
-        if (player?.isPlaying == true) return
+        if (player != null) return
 
         try {
             val uri = RingtoneManager.getDefaultUri(
                 RingtoneManager.TYPE_ALARM
             ) ?: RingtoneManager.getDefaultUri(
+                RingtoneManager.TYPE_RINGTONE
+            ) ?: RingtoneManager.getDefaultUri(
                 RingtoneManager.TYPE_NOTIFICATION
-            ) ?: return
+            )
+
+            if (uri == null) {
+                Log.e(TAG, "No default alarm, ringtone, or notification sound")
+                return
+            }
+
+            Log.i(TAG, "Preparing alarm sound: $uri")
 
             player = MediaPlayer().apply {
-                setDataSource(this@TimerAlarmService, uri)
                 setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_ALARM)
@@ -73,35 +92,56 @@ class TimerAlarmService : Service() {
                         )
                         .build()
                 )
+
+                setDataSource(this@TimerAlarmService, uri)
                 isLooping = true
-                setOnPreparedListener { it.start() }
-                setOnErrorListener { mp, _, _ ->
-                    mp.release()
-                    player = null
+
+                setOnPreparedListener { mp ->
+                    try {
+                        mp.start()
+                        Log.i(TAG, "Alarm playback started")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Could not start alarm playback", e)
+                        stopAlarm()
+                    }
+                }
+
+                setOnErrorListener { _, what, extra ->
+                    Log.e(
+                        TAG,
+                        "MediaPlayer error: what=$what extra=$extra"
+                    )
+                    stopAlarm()
                     true
                 }
+
                 prepareAsync()
             }
-        } catch (_: Exception) {
-            player?.release()
-            player = null
+        } catch (e: Exception) {
+            Log.e(TAG, "Alarm initialization failed", e)
+            stopAlarm()
         }
     }
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL,
-                "QuickDial ringing alarm",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Sounds when a QuickDial timer finishes"
-                setSound(null, null)
-                setBypassDnd(false)
-            }
+            val manager = getSystemService(
+                NotificationManager::class.java
+            )
 
-            getSystemService(NotificationManager::class.java)
-                .createNotificationChannel(channel)
+            // Android preserves existing channel settings. Do not rely
+            // on changing an existing channel's sound configuration.
+            val existing = manager.getNotificationChannel(CHANNEL)
+            if (existing == null) {
+                val channel = NotificationChannel(
+                    CHANNEL,
+                    "QuickDial ringing alarm",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Sounds when a QuickDial timer finishes"
+                }
+                manager.createNotificationChannel(channel)
+            }
         }
     }
 
@@ -138,18 +178,22 @@ class TimerAlarmService : Service() {
     }
 
     private fun stopAlarm() {
-        player?.let {
-            try {
-                if (it.isPlaying) it.stop()
-            } catch (_: IllegalStateException) {
-            }
-            it.release()
-        }
+        val oldPlayer = player
         player = null
+
+        try {
+            oldPlayer?.let {
+                if (it.isPlaying) it.stop()
+                it.release()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing alarm player", e)
+        }
     }
 
     override fun onDestroy() {
         stopAlarm()
+        Log.i(TAG, "Alarm service destroyed")
         super.onDestroy()
     }
 }

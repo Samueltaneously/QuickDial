@@ -39,6 +39,9 @@ class QuickDialWidget : AppWidgetProvider() {
         private const val CHANNEL = "quickdial_timer"
         private const val NOTIFICATION_ID = 401
 
+        private const val FINISH = "com.example.quickdial.FINISH"
+        private const val FINISH_REQUEST_CODE = 701
+
         private fun prefs(context: Context) =
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -50,44 +53,162 @@ class QuickDialWidget : AppWidgetProvider() {
             ids.forEach { provider.updateOne(context, manager, it) }
         }
 
+
+        private const val TICK_REQUEST_CODE = 700
+
+
         private fun schedule(context: Context, delay: Long) {
             val intent = Intent(context, QuickDialWidget::class.java)
                 .setAction(TICK)
+
             val pending = PendingIntent.getBroadcast(
-                context, 700, intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                context,
+                TICK_REQUEST_CODE,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or
+                        PendingIntent.FLAG_IMMUTABLE
             )
-            val alarm = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            val trigger = SystemClock.elapsedRealtime() + delay
+
+            val alarm = context.getSystemService(
+                Context.ALARM_SERVICE
+            ) as AlarmManager
+
+            val triggerAt = SystemClock.elapsedRealtime() +
+                    delay.coerceAtLeast(0L)
+
+            // Inexact alarm for widget display updates only.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 alarm.setAndAllowWhileIdle(
-                    AlarmManager.ELAPSED_REALTIME_WAKEUP, trigger, pending
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    triggerAt,
+                    pending
                 )
             } else {
+                @Suppress("DEPRECATION")
                 alarm.set(
-                    AlarmManager.ELAPSED_REALTIME_WAKEUP, trigger, pending
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    triggerAt,
+                    pending
                 )
             }
         }
 
+
         private fun cancelTick(context: Context) {
             val pending = PendingIntent.getBroadcast(
-                context, 700,
-                Intent(context, QuickDialWidget::class.java).setAction(TICK),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                context,
+                TICK_REQUEST_CODE,
+                Intent(context, QuickDialWidget::class.java)
+                    .setAction(TICK),
+                PendingIntent.FLAG_UPDATE_CURRENT or
+                        PendingIntent.FLAG_IMMUTABLE
             )
-            val alarm = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+
+            val alarm = context.getSystemService(
+                Context.ALARM_SERVICE
+            ) as AlarmManager
+
             alarm.cancel(pending)
         }
+
+
+
+        private fun scheduleCompletion(context: Context, endTimeMillis: Long) {
+            val intent = Intent(context, QuickDialWidget::class.java)
+                .setAction(FINISH)
+
+            val pending = PendingIntent.getBroadcast(
+                context,
+                FINISH_REQUEST_CODE,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or
+                        PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val alarm = context.getSystemService(
+                Context.ALARM_SERVICE
+            ) as AlarmManager
+
+            val triggerAt = SystemClock.elapsedRealtime() +
+                    (endTimeMillis - System.currentTimeMillis()).coerceAtLeast(0L)
+
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    !alarm.canScheduleExactAlarms()
+                ) {
+                    alarm.setAndAllowWhileIdle(
+                        AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                        triggerAt,
+                        pending
+                    )
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    alarm.setExactAndAllowWhileIdle(
+                        AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                        triggerAt,
+                        pending
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    alarm.setExact(
+                        AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                        triggerAt,
+                        pending
+                    )
+                }
+            } catch (e: SecurityException) {
+                android.util.Log.e(
+                    "QuickDialTimer",
+                    "Could not schedule exact completion alarm",
+                    e
+                )
+
+                alarm.setAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    triggerAt,
+                    pending
+                )
+            }
+        }
+
+        private fun cancelCompletion(context: Context) {
+            val pending = PendingIntent.getBroadcast(
+                context,
+                FINISH_REQUEST_CODE,
+                Intent(context, QuickDialWidget::class.java)
+                    .setAction(FINISH),
+                PendingIntent.FLAG_UPDATE_CURRENT or
+                        PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val alarm = context.getSystemService(
+                Context.ALARM_SERVICE
+            ) as AlarmManager
+
+            alarm.cancel(pending)
+        }
+
 
         private fun notifyFinished(context: Context) {
             val intent = Intent(context, TimerAlarmService::class.java)
                 .setAction(TimerAlarmService.ACTION_START)
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                android.util.Log.i(
+                    "QuickDialTimer",
+                    "Timer finished; attempting to start alarm service"
+                )
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e(
+                    "QuickDialTimer",
+                    "Failed to launch TimerAlarmService",
+                    e
+                )
             }
         }
 
@@ -177,6 +298,10 @@ class QuickDialWidget : AppWidgetProvider() {
     }
 
     override fun onReceive(context: Context, intent: Intent) {
+        android.util.Log.i(
+            "QuickDialTimer",
+            "Received broadcast: ${intent.action}"
+        )
         super.onReceive(context, intent)
         val p = prefs(context)
 
@@ -211,6 +336,7 @@ class QuickDialWidget : AppWidgetProvider() {
                             // PAUSE: save the remaining time.
                             val left = remainingSeconds(context)
                             cancelTick(context)
+                            cancelCompletion(context)
 
                             p.edit()
                                 .putBoolean(RUNNING, false)
@@ -224,16 +350,16 @@ class QuickDialWidget : AppWidgetProvider() {
                             val left = if (saved > 0) saved else selected
 
                             if (left > 0) {
+                                val endTime = System.currentTimeMillis() + left * 1000L
+
                                 p.edit()
                                     .putInt(REMAINING, left)
-                                    .putLong(
-                                        END_TIME,
-                                        System.currentTimeMillis() + left * 1000L
-                                    )
+                                    .putLong(END_TIME, endTime)
                                     .putBoolean(RUNNING, true)
-                                    .apply()
+                                    .commit()
 
-                                schedule(context, 1000)
+                                scheduleCompletion(context, endTime)
+                                schedule(context, 1000L)
                             }
                         }
                     }
@@ -241,6 +367,7 @@ class QuickDialWidget : AppWidgetProvider() {
                     "reset" -> {
                         // Cancel the countdown and clear all timer state.
                         cancelTick(context)
+                        cancelCompletion(context)
 
                         p.edit()
                             .putBoolean(RUNNING, false)
@@ -256,6 +383,8 @@ class QuickDialWidget : AppWidgetProvider() {
 
 
             TICK -> updateTimer(context)
+
+            FINISH -> finishTimer(context)
         }
     }
 
@@ -267,24 +396,23 @@ class QuickDialWidget : AppWidgetProvider() {
 
     private fun updateTimer(context: Context) {
         val p = prefs(context)
+
         if (!p.getBoolean(RUNNING, false)) {
             refresh(context)
             return
         }
 
-        val left = remainingSeconds(context)
-        if (left <= 0) {
-            p.edit()
-                .putBoolean(RUNNING, false)
-                .putInt(REMAINING, 0)
-                .putLong(END_TIME, 0L)
-                .apply()
-            cancelTick(context)
-            notifyFinished(context)
-        } else {
-            p.edit().putInt(REMAINING, left).apply()
-            schedule(context, 1000)
+        val endTime = p.getLong(END_TIME, 0L)
+
+        if (endTime <= 0L || System.currentTimeMillis() >= endTime) {
+            finishTimer(context)
+            return
         }
+
+        val left = remainingSeconds(context)
+        p.edit().putInt(REMAINING, left).apply()
+
+        schedule(context, 1000L)
         refresh(context)
     }
 
@@ -314,6 +442,11 @@ class QuickDialWidget : AppWidgetProvider() {
         views.setImageViewBitmap(
             R.id.dial_image,
             dialBitmap(seconds, selectedSeconds, running)
+        )
+
+        views.setTextViewText(
+            R.id.start_button,
+            if (running) "PAUSE" else "START"
         )
 
         val hasActiveTimer = running || remaining > 0
@@ -356,4 +489,40 @@ class QuickDialWidget : AppWidgetProvider() {
         bindButton(R.id.plus_button, "plus")
         manager.updateAppWidget(id, views)
     }
+
+
+    private fun finishTimer(context: Context) {
+        val p = prefs(context)
+
+        android.util.Log.i(
+            "QuickDialTimer",
+            "finishTimer called; running=${p.getBoolean(RUNNING, false)}, " +
+                    "endTime=${p.getLong(END_TIME, 0L)}, " +
+                    "now=${System.currentTimeMillis()}"
+        )
+
+        // Ignore an old completion alarm after pause or reset.
+        if (!p.getBoolean(RUNNING, false)) return
+
+        val endTime = p.getLong(END_TIME, 0L)
+
+        // Protect against an early or stale alarm.
+        if (endTime > System.currentTimeMillis()) {
+            scheduleCompletion(context, endTime)
+            return
+        }
+
+        p.edit()
+            .putBoolean(RUNNING, false)
+            .putInt(REMAINING, 0)
+            .putLong(END_TIME, 0L)
+            .commit()
+
+        cancelTick(context)
+        cancelCompletion(context)
+
+        refresh(context)
+        notifyFinished(context)
+    }
+
 }
